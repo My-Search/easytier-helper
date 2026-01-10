@@ -75,6 +75,25 @@ install_self_global() {
     fi
 }
 
+# 全局卸载逻辑（新增：对应 UI 中的「卸载」选项）
+uninstall_self_global() {
+    local target_path="/usr/local/bin/${GLOBAL_BIN_NAME}"
+    if [ ! -f "$target_path" ]; then
+        echo -e "${YELLOW}全局命令 ${GLOBAL_BIN_NAME} 未安装，无需卸载${NC}"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}正在卸载全局命令 ${target_path}...${NC}"
+    rm -f "$target_path"
+    
+    if [ ! -f "$target_path" ]; then
+        echo -e "${GREEN}全局命令 ${GLOBAL_BIN_NAME} 卸载成功${NC}"
+    else
+        echo -e "${RED}全局命令 ${GLOBAL_BIN_NAME} 卸载失败，请手动删除 ${target_path}${NC}"
+        return 1
+    fi
+}
+
 # 获取随机端口
 get_random_port() {
     echo $(( 11011 + RANDOM % 1000 ))
@@ -126,21 +145,43 @@ EOF
     fi
 }
 
-# 列出网络
+# 列出网络（修复状态显示unknown问题）
 list_networks() {
     echo -e "\n${BLUE}=== 当前已配置的 EasyTier 网络 ===${NC}"
     local services=$(ls ${SYSTEMD_DIR}/easytier-*.service 2>/dev/null)
     [ -z "$services" ] && echo -e "${YELLOW}暂无已配置的 EasyTier 网络${NC}" && return
+    
     for svc in $services; do
+        # 校验服务文件是否有效存在
+        if [ ! -f "$svc" ]; then
+            continue
+        fi
+        
         s_name=$(basename "$svc" .service)
         net_name=${s_name#easytier-}
-        status=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+        
+        # 优化状态获取：静默执行，重定向所有错误输出，确保返回值准确
+        if systemctl is-unit-file --quiet "$s_name" >/dev/null 2>&1; then
+            # 服务已加载，获取真实活动状态
+            status=$(systemctl is-active "$s_name" 2>/dev/null)
+            # 补充状态说明，区分正常停止和异常
+            if [ "$status" = "inactive" ]; then
+                status="${status}（已停止）"
+            elif [ "$status" = "active" ]; then
+                status="${status}（运行中）"
+            fi
+        else
+            # 服务未加载，标记为无效
+            status="invalid（服务未加载）"
+        fi
+        
+        # 优化虚拟IP获取，提高容错性
         ip=$(grep -oP '\-i \K[0-9\.]+' "$svc" 2>/dev/null || echo "未配置")
         echo -e "名称: ${YELLOW}${net_name}${NC} | 状态: ${GREEN}${status}${NC} | 虚拟IP: $ip"
     done
 }
 
-# 核心逻辑：创建/加入网络
+# 核心逻辑：创建/加入网络（修复一键加入命令）
 run_add_logic() {
     local p_conn_ip=$1
     local p_my_ip=$2
@@ -164,10 +205,14 @@ run_add_logic() {
         CMD_ARGS="-i ${p_my_ip} --network-name ${p_net_name} --network-secret ${p_secret} ${listener_arg}"
         create_service_file "$p_net_name" "$CMD_ARGS"
         
-        # 获取公网IP（备用多个地址）
-        PUBLIC_IP=$(curl -s4 ifconfig.me 2>/dev/null || curl -s4 icanhazip.com 2>/dev/null || echo "请替换为你的服务器公网IP")
-        # 生成一键加入命令（参考用户提供的curl格式）
-        JOIN_CMD="curl -sSL ${SCRIPT_RAW_URL} -o /tmp/easy-forward.sh && chmod +x /tmp/easy-forward.sh && bash /tmp/easy-forward.sh conn-ip=${PUBLIC_IP}:${local_port} my-ip=192.168.100.2 net-name=${p_net_name} secret=${p_secret}"
+        # 优化公网IP获取：增加多个备用地址，提高成功率
+        PUBLIC_IP=$(curl -s4 ifconfig.me 2>/dev/null || \
+                    curl -s4 icanhazip.com 2>/dev/null || \
+                    curl -s4 ipinfo.io/ip 2>/dev/null || \
+                    echo "请替换为你的服务器公网IP")
+        
+        # 修复一键加入命令：统一脚本文件名，确保与实际脚本一致
+        JOIN_CMD="curl -sSL ${SCRIPT_RAW_URL} -o /tmp/easytier-helper.sh && chmod +x /tmp/easytier-helper.sh && bash /tmp/easytier-helper.sh conn-ip=${PUBLIC_IP}:${local_port} my-ip=192.168.100.2 net-name=${p_net_name} secret=${p_secret}"
         
         echo -e "\n${GREEN}========== 网络创建成功 ==========${NC}"
         echo -e "网络名称：${YELLOW}${p_net_name}${NC}"
@@ -215,6 +260,7 @@ for arg in "$@"; do
     net-name=*) PARAM_NET_NAME="${arg#*=}" ;;
     secret=*)   PARAM_SECRET="${arg#*=}" ;;
     install)    install_self_global; exit 0 ;;
+    uninstall)  uninstall_self_global; exit 0 ;;
     list)       list_networks; exit 0 ;;
     *)          echo -e "${YELLOW}未知参数：${arg}，忽略执行${NC}" ;;
   esac
@@ -224,51 +270,53 @@ done
 if [ "$HAS_ARGS" = true ]; then
     run_add_logic "$PARAM_CONN_IP" "$PARAM_MY_IP" "$PARAM_NET_NAME" "$PARAM_SECRET"
 else
-    # 无参数进入交互菜单
+    # 无参数进入【新UI布局】交互菜单
     while true; do
-        echo -e "\n${BLUE}=== EasyTier 网络管理菜单 ===${NC}"
-        echo "1. 查看已配置网络状态"
-        echo "2. 创建新网络（作为主节点）"
-        echo "3. 加入现有网络（作为从节点）"
-        echo "4. 删除已配置网络"
-        echo "5. 安装为全局命令（可直接使用 ${GLOBAL_BIN_NAME}）"
+        echo -e "\n${BLUE}=== EasyTier 网络管理工具 ===${NC}"
+        # 核心功能区
+        echo "1. 创建网络"
+        echo "2. 加入网络"
+        echo "3. 查询已配置的网络"
+        # 第一根彩色分隔线（------------）
+        echo -e "${BLUE}------------${NC}"
+        # 辅助功能区
+        echo "4. 安装为全局命令"
+        echo "5. 卸载"
+        # 第二根彩色分隔线（--------------）
+        echo -e "${BLUE}--------------${NC}"
+        # 退出选项
         echo "0. 退出程序"
+        
         read -p "请输入你的选择 [0-5]: " choice
         case $choice in
-            1) list_networks ;;
-            2)
+            1)  # 创建网络
                 read -p "请输入网络名称 [默认: $DEFAULT_NET_NAME]: " t_name
                 read -p "请输入网络密钥 [默认: $DEFAULT_SECRET]: " t_secret
                 read -p "请输入主节点虚拟IP [默认: 192.168.100.1]: " t_my
                 run_add_logic "" "$t_my" "$t_name" "$t_secret"
                 ;;
-            3)
+            2)  # 加入网络
                 read -p "请输入主节点连接地址（格式：IP:端口）: " t_conn
                 read -p "请输入网络名称 [默认: $DEFAULT_NET_NAME]: " t_name
                 read -p "请输入本节点虚拟IP: " t_my
                 read -p "请输入网络密钥 [默认: $DEFAULT_SECRET]: " t_secret
                 run_add_logic "$t_conn" "$t_my" "$t_name" "$t_secret"
                 ;;
-            4)
+            3)  # 查询已配置的网络
                 list_networks
-                read -p "请输入要删除的网络名称: " d_name
-                local service_name="easytier-${d_name}.service"
-                local service_path="${SYSTEMD_DIR}/${service_name}"
-                if [ -f "$service_path" ]; then
-                    systemctl disable --now "$service_name" 2>/dev/null
-                    rm -f "$service_path"
-                    systemctl daemon-reload
-                    echo -e "${GREEN}网络 [${d_name}] 已成功删除${NC}"
-                else
-                    echo -e "${RED}网络 [${d_name}] 不存在${NC}"
-                fi
                 ;;
-            5) install_self_global ;;
-            0) 
+            4)  # 安装为全局命令
+                install_self_global
+                ;;
+            5)  # 卸载（全局命令）
+                uninstall_self_global
+                ;;
+            0)  # 退出程序
                 echo -e "${BLUE}感谢使用 EasyTier 网络管理脚本，再见！${NC}"
                 exit 0 
                 ;;
-            *) echo -e "${RED}无效选择，请输入 0-5 之间的数字${NC}" ;;
+            *)  # 无效选择
+                echo -e "${RED}无效选择，请输入 0-5 之间的数字${NC}" ;;
         esac
     done
 fi
