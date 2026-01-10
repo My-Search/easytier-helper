@@ -24,31 +24,59 @@ fi
 
 # ================= 工具函数 =================
 
-# 安装 EasyTier 核心
+# 安装 EasyTier 核心 (优化：在临时目录下载，防止污染当前目录)
 install_easytier() {
     if [ -f "$ET_DIR/easytier-core" ]; then
         return
     fi
     echo -e "${YELLOW}正在安装 EasyTier ${ET_VERSION}...${NC}"
-    rm -rf easytier-linux-x86_64*
-    wget -q --show-progress "https://github.com/EasyTier/EasyTier/releases/download/${ET_VERSION}/easytier-linux-x86_64-${ET_VERSION}.zip"
-    if [ $? -ne 0 ]; then echo -e "${RED}下载失败${NC}"; exit 1; fi
-    unzip -q "easytier-linux-x86_64-${ET_VERSION}.zip"
+    
+    # 创建临时目录
+    local tmp_dir="/tmp/et_install_temp"
+    mkdir -p "$tmp_dir"
+    
+    # 下载并解压
+    if ! wget -q --show-progress -O "$tmp_dir/et.zip" "https://github.com/EasyTier/EasyTier/releases/download/${ET_VERSION}/easytier-linux-x86_64-${ET_VERSION}.zip"; then
+        echo -e "${RED}下载失败，请检查网络连接。${NC}"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+    
+    unzip -q "$tmp_dir/et.zip" -d "$tmp_dir"
+    
+    # 移动核心文件
     mkdir -p "$ET_DIR"
-    find . -maxdepth 2 -name "easytier-core" -exec mv {} "$ET_DIR/" \;
-    chmod 777 -R "$ET_DIR"
-    rm -rf easytier-linux-x86_64*
-    echo -e "${GREEN}EasyTier 安装完成${NC}"
+    find "$tmp_dir" -name "easytier-core" -type f -exec mv {} "$ET_DIR/" \;
+    chmod +x "$ET_DIR/easytier-core"
+    
+    # 清理
+    rm -rf "$tmp_dir"
+    
+    if [ -f "$ET_DIR/easytier-core" ]; then
+        echo -e "${GREEN}EasyTier 安装完成${NC}"
+    else
+        echo -e "${RED}安装失败：未找到核心文件。${NC}"
+        exit 1
+    fi
 }
 
-# 安装脚本自身到系统全局
+# 安装脚本自身到系统全局 (优化：修复路径问题)
 install_self_global() {
     local target_path="/usr/local/bin/${GLOBAL_BIN_NAME}"
+    
+    # 获取脚本的绝对路径，确保复制的是真实文件
+    local current_script
+    current_script=$(realpath "$0")
+    
+    if [ ! -f "$current_script" ]; then
+         echo -e "${RED}错误：无法定位脚本源文件，请确保脚本保存在磁盘上。${NC}"
+         return
+    fi
+
     echo -e "${YELLOW}正在将脚本安装到 ${target_path}...${NC}"
     
-    # 复制当前脚本内容到目标位置
-    cp "$0" "$target_path"
-    chmod +x "$target_path"
+    # 使用 install 命令复制并赋予执行权限
+    install -m 755 "$current_script" "$target_path"
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}安装成功！${NC}"
@@ -118,6 +146,7 @@ list_networks() {
         fi
         
         exec_line=$(grep "ExecStart" "$svc")
+        # 提取IP，优化正则
         ip=$(echo "$exec_line" | grep -oP '\-i \K[0-9\.]+')
         echo -e "网络: ${YELLOW}${net_real_name}${NC} | 状态: ${status_color} | IP: ${ip}"
     done
@@ -149,22 +178,21 @@ run_add_logic() {
     local p_net_name=$3
     local p_secret=$4
 
+    # 参数检查与默认值处理
     if [ -z "$p_net_name" ]; then
-        read -p "设置网络名称 (默认: $DEFAULT_NET_NAME): " p_net_name
-        p_net_name=${p_net_name:-$DEFAULT_NET_NAME}
+        echo -e "${RED}错误: 网络名称不能为空${NC}"
+        return
     fi
-    if [ -z "$p_secret" ]; then
-        read -p "设置网络密码 (默认: $DEFAULT_SECRET): " p_secret
-        p_secret=${p_secret:-$DEFAULT_SECRET}
-    fi
+    p_secret=${p_secret:-$DEFAULT_SECRET}
 
     local local_port=$(get_random_port)
     local listener_arg="--listeners tcp://0.0.0.0:${local_port} udp://0.0.0.0:${local_port}"
 
     if [ -z "$p_conn_ip" ]; then
-        # Host Mode
-        echo -e "${BLUE}>>> 模式: 创建新网络 (Host)${NC}"
-        p_my_ip=${p_my_ip:-"192.168.100.1"}
+        # Host Mode (创建网络)
+        echo -e "${BLUE}>>> 正在配置新网络 (Host模式)${NC}"
+        
+        if [ -z "$p_my_ip" ]; then p_my_ip="192.168.100.1"; fi
         
         CMD_ARGS="-i ${p_my_ip} --network-name ${p_net_name} --network-secret ${p_secret} ${listener_arg}"
         create_service_file "$p_net_name" "$CMD_ARGS"
@@ -172,16 +200,19 @@ run_add_logic() {
         PUBLIC_IP=$(curl -s4 ifconfig.me)
         [ -z "$PUBLIC_IP" ] && PUBLIC_IP="<公网IP>"
         
+        # 简单的下个IP计算
         prefix=$(echo $p_my_ip | cut -d'.' -f1-3)
         suffix=$(echo $p_my_ip | cut -d'.' -f4)
         next_ip="${prefix}.$((suffix+1))"
 
         echo -e "\n${GREEN}网络 [${p_net_name}] 创建成功！${NC}"
-        echo -e "加入命令: ${YELLOW}${GLOBAL_BIN_NAME} conn-ip=${PUBLIC_IP}:${local_port} my-ip=${next_ip} net-name=${p_net_name} secret=${p_secret}${NC}"
+        echo -e "其他节点加入命令:\n${YELLOW}${GLOBAL_BIN_NAME} conn-ip=${PUBLIC_IP}:${local_port} my-ip=${next_ip} net-name=${p_net_name} secret=${p_secret}${NC}"
 
     else
-        # Client Mode
-        echo -e "${BLUE}>>> 模式: 加入网络 (Client)${NC}"
+        # Client Mode (加入网络)
+        echo -e "${BLUE}>>> 正在加入网络 (Client模式)${NC}"
+        
+        # 处理连接字符串
         if [[ "$p_conn_ip" != *":"* ]]; then
              PEER_URL="tcp://${p_conn_ip}:11010" 
              echo -e "${YELLOW}提示: conn-ip 未指定端口，默认尝试 11010${NC}"
@@ -190,9 +221,9 @@ run_add_logic() {
         fi
 
         if [ -z "$p_my_ip" ]; then
-            read -p "请输入本机静态IP (如 192.168.100.2): " p_my_ip
+             echo -e "${RED}错误: 加入网络必须指定本机静态IP${NC}"
+             exit 1
         fi
-        [ -z "$p_my_ip" ] && { echo "IP 不能为空"; exit 1; }
 
         CMD_ARGS="-p ${PEER_URL} -i ${p_my_ip} --network-name ${p_net_name} --network-secret ${p_secret} ${listener_arg}"
         create_service_file "$p_net_name" "$CMD_ARGS"
@@ -235,23 +266,41 @@ else
     while true; do
         echo -e "\n${BLUE}=== EasyTier 网络管理器 ===${NC}"
         echo "1. 查看已配置的网络"
-        echo "2. 创建/加入 新网络"
-        echo "3. 删除/停止 网络"
-        echo "4. 安装脚本到系统全局命令 (et-helper)"
+        echo "2. 创建新网络 (作为主机)"
+        echo "3. 加入现有网络 (作为客户端)"
+        echo "4. 删除/停止 网络"
+        echo "5. 安装脚本到系统全局命令 (et-helper)"
         echo "0. 退出"
-        read -p "请选择 [0-4]: " choice
+        read -p "请选择 [0-5]: " choice
         
         case $choice in
             1) list_networks ;;
-            2) 
-                read -p "网络名称 (英文): " t_name
+            
+            2) # 创建模式 - 不问 conn-ip
+                read -p "设置网络名称 (默认: $DEFAULT_NET_NAME): " t_name
+                t_name=${t_name:-$DEFAULT_NET_NAME}
+                read -p "设置网络密码 (默认: $DEFAULT_SECRET): " t_secret
+                t_secret=${t_secret:-$DEFAULT_SECRET}
+                read -p "本机IP (默认为 192.168.100.1): " t_my
+                # 调用核心逻辑，conn-ip 传空
+                run_add_logic "" "$t_my" "$t_name" "$t_secret"
+                ;;
+                
+            3) # 加入模式 - 必问 conn-ip
+                read -p "网络名称: " t_name
+                if [ -z "$t_name" ]; then echo "名称不能为空"; continue; fi
                 read -p "网络密码: " t_secret
-                read -p "连接IP (conn-ip, 为空则创建网络): " t_conn
-                read -p "本机IP (my-ip): " t_my
+                t_secret=${t_secret:-$DEFAULT_SECRET}
+                read -p "连接节点 (IP:端口): " t_conn
+                if [ -z "$t_conn" ]; then echo "连接节点不能为空"; continue; fi
+                read -p "本机IP (例如 192.168.100.2): " t_my
+                if [ -z "$t_my" ]; then echo "本机IP不能为空"; continue; fi
+                
                 run_add_logic "$t_conn" "$t_my" "$t_name" "$t_secret"
                 ;;
-            3) delete_network ;;
-            4) install_self_global ;;
+                
+            4) delete_network ;;
+            5) install_self_global ;;
             0) exit 0 ;;
             *) echo "无效选择" ;;
         esac
