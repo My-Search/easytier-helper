@@ -17,7 +17,7 @@ ET_DIR="/opt/easytier"
 SYSTEMD_DIR="/etc/systemd/system"
 DEFAULT_NET_NAME="default_net"
 DEFAULT_SECRET="123456"
-GLOBAL_BIN_NAME="et-helper"
+GLOBAL_BIN_NAME="easytier-helper"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/My-Search/easytier-helper/refs/heads/master/easytier-helper.sh"
 # =========================================
 
