@@ -75,7 +75,7 @@ install_self_global() {
     fi
 }
 
-# 全局卸载逻辑（新增：对应 UI 中的「卸载」选项）
+# 全局卸载逻辑（对应 UI 中的「卸载」选项）
 uninstall_self_global() {
     local target_path="/usr/local/bin/${GLOBAL_BIN_NAME}"
     if [ ! -f "$target_path" ]; then
@@ -90,6 +90,46 @@ uninstall_self_global() {
         echo -e "${GREEN}全局命令 ${GLOBAL_BIN_NAME} 卸载成功${NC}"
     else
         echo -e "${RED}全局命令 ${GLOBAL_BIN_NAME} 卸载失败，请手动删除 ${target_path}${NC}"
+        return 1
+    fi
+}
+
+# 删除已配置的网络（新增核心函数）
+delete_network() {
+    # 先列出当前已配置的网络，方便用户选择
+    list_networks
+    
+    read -p "请输入要删除的网络名称: " d_name
+    # 校验网络名称非空
+    if [ -z "$d_name" ]; then
+        echo -e "${RED}删除失败：网络名称不能为空${NC}"
+        return 1
+    fi
+    
+    local service_name="easytier-${d_name}.service"
+    local service_path="${SYSTEMD_DIR}/${service_name}"
+    
+    # 校验网络是否存在
+    if [ ! -f "$service_path" ]; then
+        echo -e "${RED}删除失败：网络 [${d_name}] 不存在${NC}"
+        return 1
+    fi
+    
+    # 停止并禁用对应服务
+    echo -e "${YELLOW}正在删除网络 [${d_name}]...${NC}"
+    systemctl disable --now "$service_name" 2>/dev/null
+    
+    # 删除服务配置文件
+    rm -f "$service_path"
+    
+    # 刷新 systemd 配置
+    systemctl daemon-reload
+    
+    # 验证删除结果
+    if [ ! -f "$service_path" ]; then
+        echo -e "${GREEN}网络 [${d_name}] 已成功删除${NC}"
+    else
+        echo -e "${RED}网络 [${d_name}] 删除失败，请手动删除 ${service_path}${NC}"
         return 1
     fi
 }
@@ -262,6 +302,7 @@ for arg in "$@"; do
     install)    install_self_global; exit 0 ;;
     uninstall)  uninstall_self_global; exit 0 ;;
     list)       list_networks; exit 0 ;;
+    delete)     delete_network; exit 0 ;; # 新增命令行参数支持
     *)          echo -e "${YELLOW}未知参数：${arg}，忽略执行${NC}" ;;
   esac
 done
@@ -270,24 +311,25 @@ done
 if [ "$HAS_ARGS" = true ]; then
     run_add_logic "$PARAM_CONN_IP" "$PARAM_MY_IP" "$PARAM_NET_NAME" "$PARAM_SECRET"
 else
-    # 无参数进入【新UI布局】交互菜单
+    # 无参数进入【新UI布局】交互菜单（补充删除网络选项）
     while true; do
         echo -e "\n${BLUE}=== EasyTier 网络管理工具 ===${NC}"
-        # 核心功能区
+        # 核心功能区（补充删除网络）
         echo "1. 创建网络"
         echo "2. 加入网络"
         echo "3. 查询已配置的网络"
+        echo "4. 删除已配置的网络" # 新增UI选项
         # 第一根彩色分隔线（------------）
         echo -e "${BLUE}------------${NC}"
         # 辅助功能区
-        echo "4. 安装为全局命令"
-        echo "5. 卸载"
+        echo "5. 安装为全局命令"
+        echo "6. 卸载" # 序号顺延
         # 第二根彩色分隔线（--------------）
         echo -e "${BLUE}--------------${NC}"
         # 退出选项
         echo "0. 退出程序"
         
-        read -p "请输入你的选择 [0-5]: " choice
+        read -p "请输入你的选择 [0-6]: " choice
         case $choice in
             1)  # 创建网络
                 read -p "请输入网络名称 [默认: $DEFAULT_NET_NAME]: " t_name
@@ -305,10 +347,13 @@ else
             3)  # 查询已配置的网络
                 list_networks
                 ;;
-            4)  # 安装为全局命令
+            4)  # 删除已配置的网络（新增菜单映射）
+                delete_network
+                ;;
+            5)  # 安装为全局命令（序号顺延）
                 install_self_global
                 ;;
-            5)  # 卸载（全局命令）
+            6)  # 卸载（全局命令，序号顺延）
                 uninstall_self_global
                 ;;
             0)  # 退出程序
@@ -316,7 +361,7 @@ else
                 exit 0 
                 ;;
             *)  # 无效选择
-                echo -e "${RED}无效选择，请输入 0-5 之间的数字${NC}" ;;
+                echo -e "${RED}无效选择，请输入 0-6 之间的数字${NC}" ;;
         esac
     done
 fi
